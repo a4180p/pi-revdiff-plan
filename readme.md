@@ -1,8 +1,8 @@
-# Plan: revdiff-plan — Plan Mode for Pi Using revdiff
+# Plan: pi-revdiff-plan — Plan Mode for Pi Using revdiff
 
 ## What this is
 
-A pi extension that gives the agent a planning mode (idle → planning → executing → idle) identical to plannotator's — but instead of opening a browser for plan review, it opens the plan file in **revdiff** (`--only=<plan.md>`). The user annotates specific lines in the TUI; no annotations = approved, annotations = feedback → agent revises and resubmits.
+A pi extension that gives the agent a planning mode (idle → planning → executing → idle) identical to [plannotator's](https://github.com/backnotprop/plannotator) — but instead of opening a browser for plan review, it opens the plan file in [**revdiff**](https://github.com/umputun/revdiff) (`--only=<plan.md>`). The user annotates specific lines in the TUI; no annotations = approved, annotations = feedback → agent revises and resubmits.
 
 Zero browser dependency. Single-file extension. Leverages the existing revdiff pi integration for the actual TUI launch.
 
@@ -30,7 +30,7 @@ During **executing**: full tool access, checklist progress tracking via `[DONE:n
 ### Files
 
 ```
-revdiff-plan/
+pi-revdiff-plan/
   index.ts       - single extension file, ~350 lines
   package.json   - pi extension package
   tsconfig.json
@@ -77,7 +77,7 @@ Persisted via `pi.appendEntry` (same pattern as plannotator + revdiff.ts).
 
 ## Key differences from plannotator
 
-| Plannotator | revdiff-plan |
+| Plannotator | pi-revdiff-plan |
 |---|---|
 | Browser UI (HTML assets) | revdiff TUI (`--only` mode) |
 | `plannotator_submit_plan` tool | `plan_submit` tool |
@@ -175,9 +175,9 @@ On `session_start` / `session_tree`, replay `appendEntry` records to restore pha
 
 ## Files to create
 
-- `revdiff-plan/index.ts` — the extension (~350 lines)
-- `revdiff-plan/package.json`
-- `revdiff-plan/tsconfig.json`
+- `pi-revdiff-plan/index.ts` — the extension (~350 lines)
+- `pi-revdiff-plan/package.json`
+- `pi-revdiff-plan/tsconfig.json`
 
 ---
 
@@ -198,7 +198,7 @@ On `session_start` / `session_tree`, replay `appendEntry` records to restore pha
 
 ```bash
 cd /some/git/repo
-pi -e /path/to/revdiff-plan
+pi -e /path/to/pi-revdiff-plan
 # Enter plan mode
 /plan
 # Agent writes PLAN.md and calls plan_submit
