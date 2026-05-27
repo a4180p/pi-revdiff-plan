@@ -71,9 +71,10 @@ function parseChecklist(markdown: string): ChecklistItem[] {
 	});
 }
 
+// Fix #3: anchored to line-start so markers inside code blocks don't fire
 function markCompletedSteps(text: string, items: ChecklistItem[]): number {
 	let count = 0;
-	for (const match of text.matchAll(/\[DONE:(\d+)\]/g)) {
+	for (const match of text.matchAll(/^\s*\[DONE:(\d+)\]/gm)) {
 		const idx = Number.parseInt(match[1]!, 10);
 		if (idx >= 0 && idx < items.length && !items[idx]!.completed) {
 			items[idx]!.completed = true;
@@ -117,6 +118,10 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	let savedTools: string[] = [];
 	let checklistItems: ChecklistItem[] = [];
 	let justApprovedPlan = false;
+	// UX #10: track revision count for status bar display
+	let submitCount = 0;
+	// UX #13: track last path passed to plan_submit within a planning session
+	let lastReviewedPath: string | null = null;
 
 	// ── Persistence ───────────────────────────────────────────────────────
 
@@ -128,7 +133,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 
 	function updateStatus(ctx: ExtensionContext): void {
 		if (phase === "planning") {
-			ctx.ui.setStatus("revdiff-plan", ctx.ui.theme.fg("warning", "⏸ plan"));
+			// UX #10: show revision count once the agent has submitted at least once
+			const label = submitCount > 0 ? `⏸ plan rev ${submitCount}` : "⏸ plan";
+			ctx.ui.setStatus("revdiff-plan", ctx.ui.theme.fg("warning", label));
 			return;
 		}
 		if (phase === "executing") {
@@ -165,6 +172,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	function enterPlanning(ctx: ExtensionContext): void {
 		phase = "planning";
 		checklistItems = [];
+		submitCount = 0;
+		lastReviewedPath = null;
 		savedTools = pi.getActiveTools();
 		pi.setActiveTools([...savedTools, PLAN_SUBMIT_TOOL]);
 		persistState();
@@ -172,24 +181,62 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify("Plan mode enabled. Agent will explore and write a plan file.", "info");
 	}
 
+	// Fix #2: append ClearedState so restoreState treats this session branch as a fresh start
 	function exitToIdle(ctx: ExtensionContext): void {
 		phase = "idle";
 		checklistItems = [];
 		lastSubmittedPath = null;
+		submitCount = 0;
+		lastReviewedPath = null;
 		pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
 		savedTools = [];
-		persistState();
+		pi.appendEntry(STATE_ENTRY_TYPE, { cleared: true } satisfies ClearedState);
 		updateStatus(ctx);
 		updateWidget(ctx);
 		ctx.ui.notify("Plan mode disabled. Full access restored.", "info");
 	}
 
+	// Fix #8: guard against silently cancelling an active execution
 	function togglePlanMode(ctx: ExtensionContext): void {
 		if (phase === "idle") {
 			enterPlanning(ctx);
-		} else {
+		} else if (phase === "planning") {
 			exitToIdle(ctx);
+		} else {
+			// executing — require an explicit /plan-abort to prevent accidental data loss
+			ctx.ui.notify(
+				"Cannot toggle plan mode during execution. Use /plan-abort to cancel and return to idle.",
+				"warning",
+			);
 		}
+	}
+
+	// Refactor #6: single helper shared by both approval paths (hasUI and !hasUI)
+	function transitionToExecuting(
+		ctx: ExtensionContext,
+		inputPath: string,
+		planContent: string,
+		pathNote: string,
+	) {
+		lastSubmittedPath = inputPath;
+		checklistItems = parseChecklist(planContent);
+		phase = "executing";
+		pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
+		pi.appendEntry(EXECUTE_ENTRY_TYPE, { lastSubmittedPath });
+		persistState();
+		justApprovedPlan = true;
+		updateStatus(ctx);
+		updateWidget(ctx);
+		// UX #12: richer notification — includes file name and step count
+		ctx.ui.notify(
+			`▶ Executing "${inputPath}" — ${checklistItems.length} step${checklistItems.length === 1 ? "" : "s"}`,
+			"info",
+		);
+		return {
+			content: [{ type: "text" as const, text: pathNote + buildApprovedPrompt(inputPath) }],
+			details: { approved: true },
+			terminate: true,
+		};
 	}
 
 	// ── revdiff launch for plan review ────────────────────────────────────
@@ -206,28 +253,33 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		const tempDir = mkdtempSync(path.join(tmpdir(), "revdiff-plan-"));
 		const outputFile = path.join(tempDir, "annotations.txt");
 		let launchError = "";
+		let rawOutput = "";
+		let exitCode: number | null = null;
 
-		const exitCode = await ctx.ui.custom<number | null>((tui, _theme, _kb, done) => {
-			tui.stop();
-			process.stdout.write("\x1b[2J\x1b[H");
-			const result = spawnSync(
-				revdiffBin,
-				["--only", planPath, `--output=${outputFile}`],
-				{
-					cwd: process.cwd(),
-					env: { ...process.env, REVDIFF_EXIT_CODE_ON_ANNOTATIONS: "true" },
-					stdio: "inherit",
-				},
-			);
-			if (result.error) launchError = result.error.message;
-			tui.start();
-			tui.requestRender(true);
-			done(result.status ?? (result.error ? 1 : 0));
-			return { render: () => [], invalidate() {} };
-		});
-
-		const rawOutput = existsSync(outputFile) ? readFileSync(outputFile, "utf8").trim() : "";
-		try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+		// Fix #4: read output inside the try so cleanup always runs in finally
+		try {
+			exitCode = await ctx.ui.custom<number | null>((tui, _theme, _kb, done) => {
+				tui.stop();
+				process.stdout.write("\x1b[2J\x1b[H");
+				const result = spawnSync(
+					revdiffBin,
+					["--only", planPath, `--output=${outputFile}`],
+					{
+						cwd: process.cwd(),
+						env: { ...process.env, REVDIFF_EXIT_CODE_ON_ANNOTATIONS: "true" },
+						stdio: "inherit",
+					},
+				);
+				if (result.error) launchError = result.error.message;
+				tui.start();
+				tui.requestRender(true);
+				done(result.status ?? (result.error ? 1 : 0));
+				return { render: () => [], invalidate() {} };
+			});
+			rawOutput = existsSync(outputFile) ? readFileSync(outputFile, "utf8").trim() : "";
+		} finally {
+			try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
 
 		if (launchError) {
 			return { approved: false, annotations: `Error launching revdiff: ${launchError}` };
@@ -291,41 +343,26 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 				return toolText(`Error: ${inputPath} is empty. Write your plan first.`);
 			}
 
+			// UX #13: note when the agent switches plan files mid-session
+			const previousPath = lastReviewedPath;
+			const pathNote =
+				previousPath !== null && previousPath !== inputPath
+					? `ℹ️ Note: plan file changed from "${previousPath}" to "${inputPath}".\n\n`
+					: "";
+
+			lastReviewedPath = inputPath;
+			submitCount++;
+			updateStatus(ctx);
+
 			if (!ctx.hasUI) {
 				// No interactive UI — auto-approve
-				lastSubmittedPath = inputPath;
-				checklistItems = parseChecklist(planContent);
-				phase = "executing";
-				pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
-				pi.appendEntry(EXECUTE_ENTRY_TYPE, { lastSubmittedPath });
-				persistState();
-				justApprovedPlan = true;
-				updateStatus(ctx);
-				updateWidget(ctx);
-				return {
-					content: [{ type: "text" as const, text: buildApprovedPrompt(inputPath) }],
-					details: { approved: true },
-					terminate: true,
-				};
+				return transitionToExecuting(ctx, inputPath, planContent, pathNote);
 			}
 
 			const { approved, annotations } = await reviewPlanWithRevdiff(ctx, fullPath);
 
 			if (approved) {
-				lastSubmittedPath = inputPath;
-				checklistItems = parseChecklist(planContent);
-				phase = "executing";
-				pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
-				pi.appendEntry(EXECUTE_ENTRY_TYPE, { lastSubmittedPath });
-				persistState();
-				justApprovedPlan = true;
-				updateStatus(ctx);
-				updateWidget(ctx);
-				return {
-					content: [{ type: "text" as const, text: buildApprovedPrompt(inputPath) }],
-					details: { approved: true },
-					terminate: true,
-				};
+				return transitionToExecuting(ctx, inputPath, planContent, pathNote);
 			}
 
 			// Feedback — stay in planning
@@ -333,7 +370,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text" as const,
-						text: buildDeniedPrompt(inputPath, annotations),
+						text: buildDeniedPrompt(inputPath, annotations, pathNote),
 					},
 				],
 				details: { approved: false },
@@ -351,10 +388,10 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		const inputPath = (event.input as { path?: string }).path;
 		if (!inputPath || !isPlanPathAllowed(inputPath, ctx.cwd)) {
 			const verb = event.toolName === "write" ? "writes" : "edits";
-			return {
-				block: true,
-				reason: `revdiff-plan: during planning, ${verb} are limited to .md/.mdx files inside the working directory. Blocked: ${inputPath ?? "(no path)"}`,
-			};
+			const reason = `revdiff-plan: during planning, ${verb} are limited to .md/.mdx files inside the working directory. Blocked: ${inputPath ?? "(no path)"}`;
+			// UX #11: surface the block to the user, not just the agent
+			ctx.ui.notify(reason, "warning");
+			return { block: true, reason };
 		}
 	});
 
@@ -407,15 +444,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			},
 			{ triggerTurn: false },
 		);
-
-		phase = "idle";
-		checklistItems = [];
-		lastSubmittedPath = null;
-		pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools());
-		savedTools = [];
-		updateStatus(ctx);
-		updateWidget(ctx);
-		persistState();
+		// Refactor #7: delegate to exitToIdle instead of duplicating reset logic
+		exitToIdle(ctx);
 	});
 
 	// Restore persisted state on session start/resume
@@ -446,7 +476,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!restored) {
-			// Ensure plan_submit is not in tool list on fresh sessions
+			// Ensure plan_submit is not in tool list on fresh/cleared sessions
 			pi.setActiveTools(pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
 			return;
 		}
@@ -480,6 +510,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 						if (text) markCompletedSteps(text, checklistItems);
 					}
 				}
+				// Fix #1: reinstate the saved tool list for the executing phase
+				pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
 			} else {
 				// Plan file gone, fall back to idle
 				phase = "idle";
@@ -498,9 +530,26 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	// ── Commands ──────────────────────────────────────────────────────────
 
 	pi.registerCommand("plan", {
-		description: "Toggle plan mode (planning → executing → idle)",
+		description: "Toggle plan mode: idle → planning, planning → idle (use /plan-abort to cancel execution)",
 		handler: async (_args, ctx) => {
 			togglePlanMode(ctx);
+		},
+	});
+
+	// Fix #8: dedicated abort command so execution can't be cancelled by accident
+	pi.registerCommand("plan-abort", {
+		description: "Cancel plan execution and return to idle",
+		handler: async (_args, ctx) => {
+			if (phase !== "executing") {
+				ctx.ui.notify(
+					phase === "idle"
+						? "Not in plan mode. Use /plan to start."
+						: "Use /plan to toggle planning mode.",
+					"info",
+				);
+				return;
+			}
+			exitToIdle(ctx);
 		},
 	});
 
@@ -560,9 +609,9 @@ function buildApprovedPrompt(filePath: string): string {
 	].join("\n\n");
 }
 
-function buildDeniedPrompt(filePath: string, annotations: string): string {
+function buildDeniedPrompt(filePath: string, annotations: string, pathNote: string): string {
 	return [
-		`The user reviewed "${filePath}" and left the following feedback:`,
+		`${pathNote}The user reviewed "${filePath}" and left the following feedback:`,
 		annotations,
 		`Please revise the plan file at "${filePath}" to address this feedback, then call ${PLAN_SUBMIT_TOOL} again.`,
 	].join("\n\n");
