@@ -71,10 +71,15 @@ function parseChecklist(markdown: string): ChecklistItem[] {
 	});
 }
 
-// Fix #3: anchored to line-start so markers inside code blocks don't fire
+// Fix #3: strip code blocks first, then match [DONE:N] anywhere in the text
+function stripCodeBlocks(text: string): string {
+	return text.replace(/```[\s\S]*?```/g, "");
+}
+
 function markCompletedSteps(text: string, items: ChecklistItem[]): number {
+	const stripped = stripCodeBlocks(text);
 	let count = 0;
-	for (const match of text.matchAll(/^\s*\[DONE:(\d+)\]/gm)) {
+	for (const match of stripped.matchAll(/\[DONE:(\d+)\]/g)) {
 		const idx = Number.parseInt(match[1]!, 10);
 		if (idx >= 0 && idx < items.length && !items[idx]!.completed) {
 			items[idx]!.completed = true;
@@ -412,16 +417,19 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	// Track checklist progress via [DONE:n] markers
-	pi.on("turn_end", async (event, ctx) => {
+	// Track checklist progress via [DONE:n] markers.
+	// Use message_end (fires when the assistant message is finalized, before tool
+	// execution) rather than turn_end (fires only after all tool results return).
+	// This ensures [DONE:N] ticks the checkbox immediately, not after a long tool run.
+	pi.on("message_end", async (event, ctx) => {
 		if (phase !== "executing" || checklistItems.length === 0) return;
 		const text = getAssistantText(event.message);
 		if (!text) return;
 		if (markCompletedSteps(text, checklistItems) > 0) {
 			updateStatus(ctx);
 			updateWidget(ctx);
+			persistState();
 		}
-		persistState();
 	});
 
 	// Detect plan completion: all items done
