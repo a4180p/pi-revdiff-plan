@@ -28,16 +28,25 @@ import type {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const STATE_ENTRY_TYPE = "revdiff-plan-state";
-const EXECUTE_ENTRY_TYPE = "revdiff-plan-execute";
+export const STATE_ENTRY_TYPE = "revdiff-plan-state";
+export const EXECUTE_ENTRY_TYPE = "revdiff-plan-execute";
 const EXIT_CODE_ANNOTATIONS = 10;
-const PLAN_SUBMIT_TOOL = "plan_submit";
+export const PLAN_SUBMIT_TOOL = "plan_submit";
 const MARK_DONE_TOOL = "mark_done";
 const ALLOWED_EXTENSIONS = new Set([".md", ".mdx"]);
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type Phase = "idle" | "planning" | "executing";
+
+export interface RuntimeState {
+	phase: Phase;
+	lastSubmittedPath: string | null;
+	savedTools: string[];
+	checklistItems: ChecklistItem[];
+	submitCount: number;
+	lastReviewedPath: string | null;
+}
 
 interface ChecklistItem {
 	text: string;
@@ -56,15 +65,16 @@ interface ClearedState {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function isPlanPathAllowed(inputPath: string, cwd: string): boolean {
+export function isPlanPathAllowed(inputPath: string, cwd: string): boolean {
 	if (!inputPath) return false;
+	if (path.isAbsolute(inputPath)) return false;
 	const abs = path.resolve(cwd, inputPath);
 	const rel = path.relative(path.resolve(cwd), abs);
 	if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
 	return ALLOWED_EXTENSIONS.has(path.extname(abs).toLowerCase());
 }
 
-function parseChecklist(markdown: string): ChecklistItem[] {
+export function parseChecklist(markdown: string): ChecklistItem[] {
 	return markdown.split("\n").flatMap((line) => {
 		const m = /^\s*-\s+\[([ xX]|DONE:\d+)\]\s+(.+)$/.exec(line);
 		if (!m) return [];
@@ -77,7 +87,7 @@ function stripCodeBlocks(text: string): string {
 	return text.replace(/```[\s\S]*?```/g, "");
 }
 
-function markCompletedSteps(text: string, items: ChecklistItem[]): number {
+export function markCompletedSteps(text: string, items: ChecklistItem[]): number {
 	const stripped = stripCodeBlocks(text);
 	let count = 0;
 	for (const match of stripped.matchAll(/\[DONE:(\d+)\]/g)) {
@@ -101,7 +111,7 @@ function resolveRevdiffBin(): string | undefined {
 	return undefined;
 }
 
-function getAssistantText(message: unknown): string | null {
+export function getAssistantText(message: unknown): string | null {
 	if (
 		typeof message !== "object" ||
 		message === null ||
@@ -615,6 +625,74 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		type: "boolean",
 		default: false,
 	});
+}
+
+// ── Exported standalone restoreState ────────────────────────────────────────
+
+export function restoreState(
+	pi: { getActiveTools(): string[]; setActiveTools(tools: string[]): void },
+	ctx: { cwd: string; sessionManager: { getBranch(): unknown[] } },
+	state: RuntimeState,
+	onUpdated: () => void,
+): void {
+	let restored: PersistedState | undefined;
+
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (
+			(entry as { type: string }).type === "custom" &&
+			(entry as { customType?: string }).customType === STATE_ENTRY_TYPE
+		) {
+			const data = (entry as { data?: unknown }).data;
+			if (isPersistedState(data)) restored = data;
+			if (isClearedState(data)) restored = undefined;
+		}
+	}
+
+	if (!restored) {
+		pi.setActiveTools(pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL));
+		return;
+	}
+
+	state.phase = restored.phase;
+	state.lastSubmittedPath = restored.lastSubmittedPath;
+	state.savedTools = restored.savedTools;
+
+	if (state.phase === "executing") {
+		if (state.lastSubmittedPath && existsSync(path.resolve(ctx.cwd, state.lastSubmittedPath))) {
+			const content = readFileSync(path.resolve(ctx.cwd, state.lastSubmittedPath), "utf8");
+			state.checklistItems = parseChecklist(content);
+
+			let execIdx = -1;
+			const entries = ctx.sessionManager.getBranch();
+			for (let i = entries.length - 1; i >= 0; i--) {
+				if (
+					(entries[i] as { type: string }).type === "custom" &&
+					(entries[i] as { customType?: string }).customType === EXECUTE_ENTRY_TYPE
+				) {
+					execIdx = i;
+					break;
+				}
+			}
+			for (let i = execIdx + 1; i < entries.length; i++) {
+				const e = entries[i] as { type: string; message?: unknown };
+				if (e.type === "message" && e.message) {
+					const text = getAssistantText(e.message);
+					if (text) markCompletedSteps(text, state.checklistItems);
+				}
+			}
+			const baseTools = state.savedTools.length > 0 ? state.savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL);
+			pi.setActiveTools([...baseTools.filter((t) => t !== MARK_DONE_TOOL)]);
+			onUpdated();
+		} else {
+			state.phase = "idle";
+			state.lastSubmittedPath = null;
+		}
+	}
+
+	if (state.phase === "planning") {
+		pi.setActiveTools([...new Set([...pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL), ...state.savedTools, PLAN_SUBMIT_TOOL])]);
+		onUpdated();
+	}
 }
 
 // ── Type guards ───────────────────────────────────────────────────────────────

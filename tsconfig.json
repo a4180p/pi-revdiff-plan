@@ -7,7 +7,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "rootDir": ".",
-    "outDir": "."
+    "outDir": "dist"
   },
-  "include": ["index.ts", "src/**/*.ts", ".pi/extensions/**/*.ts"]
+  "include": ["*.ts", "test/*.ts"]
 }
