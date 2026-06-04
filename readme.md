@@ -33,26 +33,8 @@ The review loop is simple:
 
 ## Install
 
-### As a local extension during development
-
 ```bash
-git clone <your-fork-or-this-repo>
-cd pi-revdiff-plan
-npm install
-```
-
-Run Pi with the extension directly:
-
-```bash
-pi -e /absolute/path/to/pi-revdiff-plan
-```
-
-### Install into Pi
-
-If your Pi install supports package installation:
-
-```bash
-pi install /absolute/path/to/pi-revdiff-plan
+pi install pi-revdiff-plan
 ```
 
 Then verify:
@@ -61,20 +43,26 @@ Then verify:
 pi list
 ```
 
-## Usage
+### From source
 
-Start Pi with the extension loaded, then use the plan workflow.
+```bash
+git clone <this-repo>
+cd pi-revdiff-plan
+pi install .
+```
+
+## Usage
 
 ### Start in normal mode
 
 ```bash
-pi -e /absolute/path/to/pi-revdiff-plan
+pi
 ```
 
 ### Start directly in plan mode
 
 ```bash
-pi -e /absolute/path/to/pi-revdiff-plan --plan
+pi --plan
 ```
 
 ### Typical session
@@ -121,7 +109,7 @@ Starts Pi with plan mode enabled.
 Example:
 
 ```bash
-pi -e /absolute/path/to/pi-revdiff-plan --plan
+pi --plan
 ```
 
 ## How plan files should look
