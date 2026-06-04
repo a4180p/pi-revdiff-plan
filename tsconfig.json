@@ -5,6 +5,9 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
-  }
+    "skipLibCheck": true,
+    "rootDir": ".",
+    "outDir": "."
+  },
+  "include": ["index.ts", "src/**/*.ts", ".pi/extensions/**/*.ts"]
 }

@@ -32,6 +32,7 @@ const STATE_ENTRY_TYPE = "revdiff-plan-state";
 const EXECUTE_ENTRY_TYPE = "revdiff-plan-execute";
 const EXIT_CODE_ANNOTATIONS = 10;
 const PLAN_SUBMIT_TOOL = "plan_submit";
+const MARK_DONE_TOOL = "mark_done";
 const ALLOWED_EXTENSIONS = new Set([".md", ".mdx"]);
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -193,7 +194,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		lastSubmittedPath = null;
 		submitCount = 0;
 		lastReviewedPath = null;
-		pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
+		pi.setActiveTools((savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL)).filter((t) => t !== MARK_DONE_TOOL));
 		savedTools = [];
 		pi.appendEntry(STATE_ENTRY_TYPE, { cleared: true } satisfies ClearedState);
 		updateStatus(ctx);
@@ -226,7 +227,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		lastSubmittedPath = inputPath;
 		checklistItems = parseChecklist(planContent);
 		phase = "executing";
-		pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
+		pi.setActiveTools([...(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL)), MARK_DONE_TOOL]);
 		pi.appendEntry(EXECUTE_ENTRY_TYPE, { lastSubmittedPath });
 		persistState();
 		justApprovedPlan = true;
@@ -383,6 +384,35 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerTool({
+		name: MARK_DONE_TOOL,
+		label: "Mark Step Done",
+		description: "Mark a plan step as completed. Call this after finishing each step, before starting the next one.",
+		parameters: Type.Object({
+			index: Type.Number({
+				description: "Zero-based index of the completed step.",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (phase !== "executing") {
+				return toolText("Error: Not in executing phase.");
+			}
+			const { index } = params as { index: number };
+			if (index < 0 || index >= checklistItems.length) {
+				return toolText(`Error: index ${index} out of range (0–${checklistItems.length - 1}).`);
+			}
+			if (checklistItems[index]!.completed) {
+				return toolText(`Step ${index} already marked done.`);
+			}
+			checklistItems[index]!.completed = true;
+			updateStatus(ctx);
+			updateWidget(ctx);
+			persistState();
+			const done = checklistItems.filter((t) => t.completed).length;
+			return toolText(`Step ${index} done. Progress: ${done}/${checklistItems.length}`);
+		},
+	});
+
 	// ── Event hooks ───────────────────────────────────────────────────────
 
 	// Gate writes during planning to markdown files only
@@ -409,22 +439,21 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			const remaining = checklistItems
 				.map((t, i) => ({ t, i }))
 				.filter(({ t }) => !t.completed)
-				.map(({ t, i }) => `- [ ] [DONE:${i}] ${t.text}`)
+				.map(({ t, i }) => `${i}. ${t.text}`)
 				.join("\n");
 			return {
-				systemPrompt: `[EXECUTING]\nRemaining steps — mark each done with [DONE:N] in your response when completed:\n${remaining}`,
+				systemPrompt: `[EXECUTING]\nWork through the remaining steps in order. After completing each step, call mark_done(index) with its zero-based index before starting the next step.\n\nRemaining steps:\n${remaining}`,
 			};
 		}
 	});
 
-	// Track checklist progress via [DONE:n] markers.
-	// Use message_end (fires when the assistant message is finalized, before tool
-	// execution) rather than turn_end (fires only after all tool results return).
-	// This ensures [DONE:N] ticks the checkbox immediately, not after a long tool run.
+	// Safety net for session restore: scan [DONE:N] markers in finalized messages.
+	// During normal execution mark_done tool handles progress tracking.
 	pi.on("message_end", async (event, ctx) => {
 		if (phase !== "executing" || checklistItems.length === 0) return;
 		const text = getAssistantText(event.message);
 		if (!text) return;
+		// markCompletedSteps skips already-completed items, so no double-counting.
 		if (markCompletedSteps(text, checklistItems) > 0) {
 			updateStatus(ctx);
 			updateWidget(ctx);
@@ -484,8 +513,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!restored) {
-			// Ensure plan_submit is not in tool list on fresh/cleared sessions
-			pi.setActiveTools(pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
+			// Ensure plan_submit and mark_done are not in tool list on fresh/cleared sessions
+			pi.setActiveTools(pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL));
 			return;
 		}
 
@@ -518,8 +547,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 						if (text) markCompletedSteps(text, checklistItems);
 					}
 				}
-				// Fix #1: reinstate the saved tool list for the executing phase
-				pi.setActiveTools(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL));
+				// Fix #1: reinstate the saved tool list for the executing phase, with mark_done added
+				const baseTools = savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL);
+				pi.setActiveTools([...baseTools.filter((t) => t !== MARK_DONE_TOOL), MARK_DONE_TOOL]);
 			} else {
 				// Plan file gone, fall back to idle
 				phase = "idle";
