@@ -1,6 +1,6 @@
 {
   "name": "pi-revdiff-plan",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Pi plan mode with revdiff TUI review",
   "keywords": ["pi-package", "plan", "revdiff"],
