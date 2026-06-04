@@ -16,13 +16,11 @@
   },
   "files": [
     "index.ts",
-    "src",
-    ".pi/extensions/rtk.ts",
     "readme.md",
     "LICENSE"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.75.5"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.75.5",
