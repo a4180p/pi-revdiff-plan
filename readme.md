@@ -112,6 +112,19 @@ Example:
 pi --plan
 ```
 
+## Keyword trigger
+
+Plan mode also activates automatically when you type a message containing one of these trigger words:
+
+| Keyword | Example phrase |
+|---------|---------------|
+| `plan` | "let's plan this feature" |
+| `design` | "design a new caching layer" |
+| `spec` | "write a spec for the API" |
+| `blueprint` | "blueprint the migration" |
+
+The trigger only fires for **interactive** input (your keystrokes). Messages sent by extensions or RPC clients — including the internal `"Continue with the approved plan."` prompt — are ignored, so plan mode cannot be accidentally re-entered by the agent mid-session.
+
 ## How plan files should look
 
 The agent is prompted to create a markdown plan with sections like:
@@ -211,15 +224,12 @@ If those files exist in your fork, check `.github/workflows/`.
 ## Project structure
 
 ```text
-index.ts                # extension entrypoint
-src/constants.ts        # shared constants
-src/parsing.ts          # checklist parsing and path validation
-src/prompts.ts          # agent prompt helpers
-src/review.ts           # revdiff launch/review flow
-src/state.ts            # persistence and restore helpers
-src/commands.ts         # slash commands and flag registration
-.pi/extensions/rtk.ts   # optional RTK bash rewrite helper
-test/*.test.ts          # automated tests
+index.ts                   # extension entrypoint — all logic lives here
+test/keywords.test.ts      # keyword regex + source-filter integration tests
+test/parsing.test.ts       # checklist parsing, path validation, getAssistantText
+test/state.test.ts         # restoreState persistence tests
+.pi/extensions/rtk.ts      # optional RTK bash rewrite helper
+readme.md                  # this file
 ```
 
 ## License

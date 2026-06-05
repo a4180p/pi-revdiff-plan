@@ -34,6 +34,7 @@ const EXIT_CODE_ANNOTATIONS = 10;
 export const PLAN_SUBMIT_TOOL = "plan_submit";
 const MARK_DONE_TOOL = "mark_done";
 const ALLOWED_EXTENSIONS = new Set([".md", ".mdx"]);
+export const TRIGGER_KEYWORDS = ["plan", "design", "spec", "blueprint"];
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -63,7 +64,15 @@ interface ClearedState {
 	cleared: true;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Keyword helpers ─────────────────────────────────────────────────────────
+
+export function buildKeywordRegex(keywords: string[]): RegExp | null {
+	if (keywords.length === 0) return null;
+	const escaped = keywords.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	return new RegExp(`\\b(${escaped.join("|")})\\b`, "i");
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function isPlanPathAllowed(inputPath: string, cwd: string): boolean {
 	if (!inputPath) return false;
@@ -508,6 +517,16 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		restoreState(ctx);
 	});
 
+	// Auto-activate plan mode when user input contains a trigger keyword
+	const keywordRegex = buildKeywordRegex(TRIGGER_KEYWORDS);
+	pi.on("input", async (event, ctx) => {
+		if (phase !== "idle" || !keywordRegex) return;
+		if (event.source !== "interactive") return;
+		if (keywordRegex.test(event.text)) {
+			enterPlanning(ctx);
+		}
+	});
+
 	function restoreState(ctx: ExtensionContext): void {
 		let restored: PersistedState | undefined;
 
@@ -681,7 +700,7 @@ export function restoreState(
 				}
 			}
 			const baseTools = state.savedTools.length > 0 ? state.savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL);
-			pi.setActiveTools([...baseTools.filter((t) => t !== MARK_DONE_TOOL)]);
+			pi.setActiveTools([...baseTools.filter((t) => t !== MARK_DONE_TOOL), MARK_DONE_TOOL]);
 			onUpdated();
 		} else {
 			state.phase = "idle";
