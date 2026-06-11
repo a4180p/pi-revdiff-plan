@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import revdiffPlanExtension, { buildKeywordRegex, TRIGGER_KEYWORDS } from "../index.js";
+import revdiffPlanExtension, {
+	buildKeywordRegex,
+	shouldTriggerPlanMode,
+	TRIGGER_KEYWORDS,
+} from "../index.js";
 
 // ── Minimal ExtensionAPI stub ────────────────────────────────────────────────
 // Enough surface to mount the extension and fire input events.
@@ -108,6 +112,31 @@ test("buildKeywordRegex escapes regex special chars in keywords (no throw)", () 
 	assert.ok(re.test("plan"));
 });
 
+test("shouldTriggerPlanMode returns false for negation, meta, and past-tense phrases", () => {
+	for (const text of [
+		"I've disabled the plan mode",
+		"explain the plan",
+		"no need to plan",
+		"the plan was approved",
+		"exit plan mode",
+	]) {
+		assert.equal(shouldTriggerPlanMode(text), false, `should not trigger for: ${text}`);
+	}
+});
+
+test("shouldTriggerPlanMode returns true for forward-looking planning requests", () => {
+	for (const text of [
+		"let's plan this",
+		"plan the migration",
+		"design a new api",
+		"can you spec this out",
+		"make a plan",
+		"blueprint the feature",
+	]) {
+		assert.equal(shouldTriggerPlanMode(text), true, `should trigger for: ${text}`);
+	}
+});
+
 // ── Source-filter integration tests ──────────────────────────────────────────────
 // These exercise the extension's input handler via a lightweight stub so we
 // can verify the source guard without spinning up the full Pi runtime.
@@ -141,6 +170,16 @@ test("input handler: 'interactive' source DOES trigger plan mode when keyword pr
 	// enterPlanning() adds plan_submit to the tool list
 	assert.ok(getTools().includes("plan_submit"),
 		"plan_submit should be in active tools after interactive keyword trigger");
+});
+
+test("input handler: 'interactive' source with suppressed keyword phrase does not trigger plan mode", async () => {
+	const { emitInput, getTools } = buildStub();
+	const toolsBefore = getTools();
+
+	await emitInput("explain the plan", "interactive");
+
+	assert.deepEqual(getTools(), toolsBefore,
+		"tools should be unchanged for suppressed keyword phrases");
 });
 
 test("input handler: 'interactive' source without keyword does not trigger plan mode", async () => {

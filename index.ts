@@ -72,6 +72,38 @@ export function buildKeywordRegex(keywords: string[]): RegExp | null {
 	return new RegExp(`\\b(${escaped.join("|")})\\b`, "i");
 }
 
+export function shouldTriggerPlanMode(text: string): boolean {
+	const keywordRegex = buildKeywordRegex(TRIGGER_KEYWORDS);
+	if (!keywordRegex?.test(text)) return false;
+
+	const normalized = text
+		.toLowerCase()
+		.replace(/[^a-z0-9\s]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!normalized) return false;
+
+	const escapedKeywords = TRIGGER_KEYWORDS.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	const keywordPattern = `(?:${escapedKeywords.join("|")})`;
+	const suppressionPatterns = [
+		new RegExp(`\\b(?:no|not|dont|do not|never|stop|cancel|exit|disable|disabled|turn off|leave)\\b.*\\b${keywordPattern}\\b`),
+		new RegExp(`\\bno need to\\s+${keywordPattern}\\b`),
+		new RegExp(`\\b(?:explain|describe|review|summarize|show|tell me about)\\b.*\\b${keywordPattern}\\b`),
+		new RegExp(`\\bthe\\s+${keywordPattern}\\s+(?:mode|was|were|is|already|approved|done)\\b`),
+		new RegExp(`\\b${keywordPattern}\\s+mode\\b`),
+	];
+	if (suppressionPatterns.some((pattern) => pattern.test(normalized))) return false;
+
+	const intentPatterns = [
+		new RegExp(`^${keywordPattern}\\b(?:\\s+.+)?$`),
+		new RegExp(`^(?:let s|lets)\\s+${keywordPattern}\\b`),
+		new RegExp(`^(?:can|could|would|will)\\s+you\\s+${keywordPattern}\\b`),
+		new RegExp(`^we\\s+should\\s+${keywordPattern}\\b`),
+		new RegExp(`^(?:make|write|create)\\s+(?:a\\s+|an\\s+)?${keywordPattern}\\b`),
+	];
+	return intentPatterns.some((pattern) => pattern.test(normalized));
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function isPlanPathAllowed(inputPath: string, cwd: string): boolean {
@@ -518,11 +550,10 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	});
 
 	// Auto-activate plan mode when user input contains a trigger keyword
-	const keywordRegex = buildKeywordRegex(TRIGGER_KEYWORDS);
 	pi.on("input", async (event, ctx) => {
-		if (phase !== "idle" || !keywordRegex) return;
+		if (phase !== "idle") return;
 		if (event.source !== "interactive") return;
-		if (keywordRegex.test(event.text)) {
+		if (shouldTriggerPlanMode(event.text)) {
 			enterPlanning(ctx);
 		}
 	});
