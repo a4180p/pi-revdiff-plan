@@ -6,7 +6,7 @@
  * During planning:
  * - Agent explores codebase, writes a markdown plan file
  * - Writes/edits restricted to .md/.mdx files inside cwd
- * - Agent calls plan_submit(filePath) to request review
+ * - Agent calls revdiff_submit_plan(filePath) to request review
  * - revdiff opens with --only=<file>; user annotates or quits clean
  * - No annotations → approved → transition to executing
  * - Annotations → feedback returned to agent → agent revises → resubmit
@@ -16,7 +16,13 @@
  * - Checklist progress tracked via [DONE:n] markers in agent responses
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -31,8 +37,11 @@ import type {
 export const STATE_ENTRY_TYPE = "revdiff-plan-state";
 export const EXECUTE_ENTRY_TYPE = "revdiff-plan-execute";
 const EXIT_CODE_ANNOTATIONS = 10;
-export const PLAN_SUBMIT_TOOL = "plan_submit";
-const MARK_DONE_TOOL = "mark_done";
+export const PLAN_SUBMIT_TOOL = "revdiff_submit_plan";
+const MARK_DONE_TOOL = "revdiff_mark_done";
+// Tool names used before the plannotator-aligned rename. Sessions persisted
+// under the old names must not carry a stale tool into a restored tool list.
+const LEGACY_PLAN_TOOLS = ["plan_submit", "mark_done"];
 const ALLOWED_EXTENSIONS = new Set([".md", ".mdx"]);
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -65,9 +74,51 @@ interface ClearedState {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+function stripPlanTools(tools: readonly string[]): string[] {
+	return tools.filter(
+		(t) =>
+			t !== PLAN_SUBMIT_TOOL &&
+			t !== MARK_DONE_TOOL &&
+			!LEGACY_PLAN_TOOLS.includes(t),
+	);
+}
+
+export interface ReviewOutcome {
+	outcome: "approved" | "feedback" | "closed";
+	annotations: string;
+}
+
+// revdiff exposes two signals only: exit 0 (clean quit) and exit 10
+// (annotations produced). Anything else means the session ended without a
+// decision, which is its own outcome rather than feedback on the plan.
+export function classifyReviewOutcome(
+	launchError: string,
+	exitCode: number | null,
+	rawOutput: string,
+): ReviewOutcome {
+	if (launchError) {
+		return {
+			outcome: "closed",
+			annotations: `failed to launch revdiff: ${launchError}`,
+		};
+	}
+	if (
+		typeof exitCode !== "number" ||
+		(exitCode !== 0 && exitCode !== EXIT_CODE_ANNOTATIONS)
+	) {
+		return {
+			outcome: "closed",
+			annotations: `revdiff exited with code ${exitCode ?? "unknown"}`,
+		};
+	}
+	if (!rawOutput) {
+		return { outcome: "approved", annotations: "" };
+	}
+	return { outcome: "feedback", annotations: rawOutput };
+}
+
 export function isPlanPathAllowed(inputPath: string, cwd: string): boolean {
 	if (!inputPath) return false;
-	if (path.isAbsolute(inputPath)) return false;
 	const abs = path.resolve(cwd, inputPath);
 	const rel = path.relative(path.resolve(cwd), abs);
 	if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
@@ -87,7 +138,10 @@ function stripCodeBlocks(text: string): string {
 	return text.replace(/```[\s\S]*?```/g, "");
 }
 
-export function markCompletedSteps(text: string, items: ChecklistItem[]): number {
+export function markCompletedSteps(
+	text: string,
+	items: ChecklistItem[],
+): number {
 	const stripped = stripCodeBlocks(text);
 	let count = 0;
 	for (const match of stripped.matchAll(/\[DONE:(\d+)\]/g)) {
@@ -116,7 +170,8 @@ export function getAssistantText(message: unknown): string | null {
 		typeof message !== "object" ||
 		message === null ||
 		(message as { role?: unknown }).role !== "assistant"
-	) return null;
+	)
+		return null;
 	const content = (message as { content?: unknown }).content;
 	if (!Array.isArray(content)) return null;
 	const text = content
@@ -136,13 +191,17 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	let justApprovedPlan = false;
 	// UX #10: track revision count for status bar display
 	let submitCount = 0;
-	// UX #13: track last path passed to plan_submit within a planning session
+	// UX #13: track last path passed to revdiff_submit_plan within a planning session
 	let lastReviewedPath: string | null = null;
 
 	// ── Persistence ───────────────────────────────────────────────────────
 
 	function persistState(): void {
-		pi.appendEntry(STATE_ENTRY_TYPE, { phase, lastSubmittedPath, savedTools } satisfies PersistedState);
+		pi.appendEntry(STATE_ENTRY_TYPE, {
+			phase,
+			lastSubmittedPath,
+			savedTools,
+		} satisfies PersistedState);
 	}
 
 	// ── Status / Widget ───────────────────────────────────────────────────
@@ -157,7 +216,10 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		if (phase === "executing") {
 			if (checklistItems.length > 0) {
 				const done = checklistItems.filter((t) => t.completed).length;
-				ctx.ui.setStatus("revdiff-plan", ctx.ui.theme.fg("accent", `📋 ${done}/${checklistItems.length}`));
+				ctx.ui.setStatus(
+					"revdiff-plan",
+					ctx.ui.theme.fg("accent", `📋 ${done}/${checklistItems.length}`),
+				);
 			} else {
 				ctx.ui.setStatus("revdiff-plan", ctx.ui.theme.fg("accent", "▶ exec"));
 			}
@@ -191,10 +253,13 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		submitCount = 0;
 		lastReviewedPath = null;
 		savedTools = pi.getActiveTools();
-		pi.setActiveTools([...savedTools, PLAN_SUBMIT_TOOL]);
+		pi.setActiveTools([...stripPlanTools(savedTools), PLAN_SUBMIT_TOOL]);
 		persistState();
 		updateStatus(ctx);
-		ctx.ui.notify("Plan mode enabled. Agent will explore and write a plan file.", "info");
+		ctx.ui.notify(
+			"Plan mode enabled. Agent will explore and write a plan file.",
+			"info",
+		);
 	}
 
 	// Fix #2: append ClearedState so restoreState treats this session branch as a fresh start
@@ -204,7 +269,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		lastSubmittedPath = null;
 		submitCount = 0;
 		lastReviewedPath = null;
-		pi.setActiveTools((savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL)).filter((t) => t !== MARK_DONE_TOOL));
+		pi.setActiveTools(
+			stripPlanTools(savedTools.length > 0 ? savedTools : pi.getActiveTools()),
+		);
 		savedTools = [];
 		pi.appendEntry(STATE_ENTRY_TYPE, { cleared: true } satisfies ClearedState);
 		updateStatus(ctx);
@@ -219,9 +286,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		} else if (phase === "planning") {
 			exitToIdle(ctx);
 		} else {
-			// executing — require an explicit /plan-abort to prevent accidental data loss
+			// executing — require an explicit /revdiff-plan-abort to prevent accidental data loss
 			ctx.ui.notify(
-				"Cannot toggle plan mode during execution. Use /plan-abort to cancel and return to idle.",
+				"Cannot toggle plan mode during execution. Use /revdiff-plan-abort to cancel and return to idle.",
 				"warning",
 			);
 		}
@@ -237,7 +304,10 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		lastSubmittedPath = inputPath;
 		checklistItems = parseChecklist(planContent);
 		phase = "executing";
-		pi.setActiveTools([...(savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL)), MARK_DONE_TOOL]);
+		pi.setActiveTools([
+			...stripPlanTools(savedTools.length > 0 ? savedTools : pi.getActiveTools()),
+			MARK_DONE_TOOL,
+		]);
 		pi.appendEntry(EXECUTE_ENTRY_TYPE, { lastSubmittedPath });
 		persistState();
 		justApprovedPlan = true;
@@ -249,7 +319,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			"info",
 		);
 		return {
-			content: [{ type: "text" as const, text: pathNote + buildApprovedPrompt(inputPath) }],
+			content: [
+				{ type: "text" as const, text: pathNote + buildApprovedPrompt(inputPath) },
+			],
 			details: { approved: true },
 			terminate: true,
 		};
@@ -260,10 +332,14 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	async function reviewPlanWithRevdiff(
 		ctx: ExtensionContext,
 		planPath: string,
-	): Promise<{ approved: boolean; annotations: string }> {
+	): Promise<ReviewOutcome> {
 		const revdiffBin = resolveRevdiffBin();
 		if (!revdiffBin) {
-			return { approved: false, annotations: "Error: revdiff binary not found. Install it with: brew install umputun/apps/revdiff" };
+			return {
+				outcome: "closed",
+				annotations:
+					"revdiff binary not found. Install it with: brew install umputun/apps/revdiff",
+			};
 		}
 
 		const tempDir = mkdtempSync(path.join(tmpdir(), "revdiff-plan-"));
@@ -292,25 +368,21 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 				done(result.status ?? (result.error ? 1 : 0));
 				return { render: () => [], invalidate() {} };
 			});
-			rawOutput = existsSync(outputFile) ? readFileSync(outputFile, "utf8").trim() : "";
+			rawOutput = existsSync(outputFile)
+				? readFileSync(outputFile, "utf8").trim()
+				: "";
 		} finally {
-			try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+			try {
+				rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
 		}
 
-		if (launchError) {
-			return { approved: false, annotations: `Error launching revdiff: ${launchError}` };
-		}
-		if (typeof exitCode !== "number" || (exitCode !== 0 && exitCode !== EXIT_CODE_ANNOTATIONS)) {
-			return { approved: false, annotations: `revdiff exited with code ${exitCode ?? "unknown"}` };
-		}
-
-		if (!rawOutput) {
-			return { approved: true, annotations: "" };
-		}
-		return { approved: false, annotations: rawOutput };
+		return classifyReviewOutcome(launchError, exitCode, rawOutput);
 	}
 
-	// ── plan_submit tool ──────────────────────────────────────────────────
+	// ── revdiff_submit_plan tool ──────────────────────────────────────────
 
 	pi.registerTool({
 		name: PLAN_SUBMIT_TOOL,
@@ -320,7 +392,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			"Call this only while plan mode is active, after writing your plan as a markdown file inside the working directory. " +
 			"Pass the path to the plan file (e.g. PLAN.md or plans/feature.md). " +
 			"The user reviews the plan in revdiff and can approve (quit clean) or annotate lines with feedback. " +
-			"If feedback is returned, revise the plan in-place and call plan_submit again.",
+			"If feedback is returned, revise the plan in-place and call revdiff_submit_plan again.",
 		parameters: Type.Object({
 			filePath: Type.String({
 				description:
@@ -330,12 +402,16 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (phase !== "planning") {
-				return toolText("Error: Not in plan mode. Use /plan to enter planning mode first.");
+				return toolText(
+					"Error: Not in plan mode. Use /revdiff-plan-mode to enter planning mode first.",
+				);
 			}
 
 			const inputPath = (params as { filePath?: string })?.filePath?.trim() ?? "";
 			if (!inputPath) {
-				return toolText(`Error: ${PLAN_SUBMIT_TOOL} requires a filePath argument (e.g. "PLAN.md").`);
+				return toolText(
+					`Error: ${PLAN_SUBMIT_TOOL} requires a filePath argument (e.g. "PLAN.md").`,
+				);
 			}
 
 			if (!isPlanPathAllowed(inputPath, ctx.cwd)) {
@@ -348,10 +424,14 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 
 			try {
 				if (!statSync(fullPath).isFile()) {
-					return toolText(`Error: ${inputPath} is not a regular file. Write your plan first.`);
+					return toolText(
+						`Error: ${inputPath} is not a regular file. Write your plan first.`,
+					);
 				}
 			} catch {
-				return toolText(`Error: ${inputPath} does not exist. Write your plan using the write tool first.`);
+				return toolText(
+					`Error: ${inputPath} does not exist. Write your plan using the write tool first.`,
+				);
 			}
 
 			const planContent = readFileSync(fullPath, "utf8");
@@ -375,10 +455,23 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 				return transitionToExecuting(ctx, inputPath, planContent, pathNote);
 			}
 
-			const { approved, annotations } = await reviewPlanWithRevdiff(ctx, fullPath);
+			const { outcome, annotations } = await reviewPlanWithRevdiff(ctx, fullPath);
 
-			if (approved) {
+			if (outcome === "approved") {
 				return transitionToExecuting(ctx, inputPath, planContent, pathNote);
+			}
+
+			if (outcome === "closed") {
+				// No decision was made — must not reach the agent as plan feedback.
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: buildClosedPrompt(inputPath, annotations),
+						},
+					],
+					details: { approved: false },
+				};
 			}
 
 			// Feedback — stay in planning
@@ -397,7 +490,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: MARK_DONE_TOOL,
 		label: "Mark Step Done",
-		description: "Mark a plan step as completed. Call this after finishing each step, before starting the next one.",
+		description:
+			"Mark a plan step as completed. Call this after finishing each step, before starting the next one.",
 		parameters: Type.Object({
 			index: Type.Number({
 				description: "Zero-based index of the completed step.",
@@ -409,7 +503,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			}
 			const { index } = params as { index: number };
 			if (index < 0 || index >= checklistItems.length) {
-				return toolText(`Error: index ${index} out of range (0–${checklistItems.length - 1}).`);
+				return toolText(
+					`Error: index ${index} out of range (0–${checklistItems.length - 1}).`,
+				);
 			}
 			if (checklistItems[index]!.completed) {
 				return toolText(`Step ${index} already marked done.`);
@@ -419,7 +515,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			updateWidget(ctx);
 			persistState();
 			const done = checklistItems.filter((t) => t.completed).length;
-			return toolText(`Step ${index} done. Progress: ${done}/${checklistItems.length}`);
+			return toolText(
+				`Step ${index} done. Progress: ${done}/${checklistItems.length}`,
+			);
 		},
 	});
 
@@ -452,13 +550,13 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 				.map(({ t, i }) => `${i}. ${t.text}`)
 				.join("\n");
 			return {
-				systemPrompt: `[EXECUTING]\nWork through the remaining steps in order. After completing each step, call mark_done(index) with its zero-based index before starting the next step.\n\nRemaining steps:\n${remaining}`,
+				systemPrompt: `[EXECUTING]\nWork through the remaining steps in order. After completing each step, call ${MARK_DONE_TOOL}(index) with its zero-based index before starting the next step.\n\nRemaining steps:\n${remaining}`,
 			};
 		}
 	});
 
 	// Safety net for session restore: scan [DONE:N] markers in finalized messages.
-	// During normal execution mark_done tool handles progress tracking.
+	// During normal execution revdiff_mark_done tool handles progress tracking.
 	pi.on("message_end", async (event, ctx) => {
 		if (phase !== "executing" || checklistItems.length === 0) return;
 		const text = getAssistantText(event.message);
@@ -482,7 +580,9 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		if (phase !== "executing" || checklistItems.length === 0) return;
 		if (!checklistItems.every((t) => t.completed)) return;
 
-		const completedList = checklistItems.map((t) => `- [x] ~~${t.text}~~`).join("\n");
+		const completedList = checklistItems
+			.map((t) => `- [x] ~~${t.text}~~`)
+			.join("\n");
 		pi.sendMessage(
 			{
 				customType: "revdiff-plan-complete",
@@ -497,7 +597,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 
 	// Restore persisted state on session start/resume
 	pi.on("session_start", async (_event, ctx) => {
-		if (pi.getFlag("plan") === true && phase === "idle") {
+		if (pi.getFlag("revdiff-plan") === true && phase === "idle") {
 			enterPlanning(ctx);
 			return;
 		}
@@ -523,8 +623,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		}
 
 		if (!restored) {
-			// Ensure plan_submit and mark_done are not in tool list on fresh/cleared sessions
-			pi.setActiveTools(pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL));
+			// Ensure plan/execute tools are not in tool list on fresh/cleared sessions
+			pi.setActiveTools(stripPlanTools(pi.getActiveTools()));
 			return;
 		}
 
@@ -534,8 +634,14 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 
 		if (phase === "executing") {
 			// Re-load checklist from disk + scan session messages for [DONE:n]
-			if (lastSubmittedPath && existsSync(path.resolve(ctx.cwd, lastSubmittedPath))) {
-				const content = readFileSync(path.resolve(ctx.cwd, lastSubmittedPath), "utf8");
+			if (
+				lastSubmittedPath &&
+				existsSync(path.resolve(ctx.cwd, lastSubmittedPath))
+			) {
+				const content = readFileSync(
+					path.resolve(ctx.cwd, lastSubmittedPath),
+					"utf8",
+				);
 				checklistItems = parseChecklist(content);
 
 				// Find execute marker, then scan subsequent messages
@@ -557,9 +663,11 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 						if (text) markCompletedSteps(text, checklistItems);
 					}
 				}
-				// Fix #1: reinstate the saved tool list for the executing phase, with mark_done added
-				const baseTools = savedTools.length > 0 ? savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL);
-				pi.setActiveTools([...baseTools.filter((t) => t !== MARK_DONE_TOOL), MARK_DONE_TOOL]);
+				// Fix #1: reinstate the saved tool list for the executing phase, with the mark-done tool added
+				const baseTools = stripPlanTools(
+					savedTools.length > 0 ? savedTools : pi.getActiveTools(),
+				);
+				pi.setActiveTools([...baseTools, MARK_DONE_TOOL]);
 			} else {
 				// Plan file gone, fall back to idle
 				phase = "idle";
@@ -568,7 +676,13 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		}
 
 		if (phase === "planning") {
-			pi.setActiveTools([...new Set([...pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL), ...savedTools, PLAN_SUBMIT_TOOL])]);
+			pi.setActiveTools([
+				...new Set([
+					...stripPlanTools(pi.getActiveTools()),
+					...stripPlanTools(savedTools),
+					PLAN_SUBMIT_TOOL,
+				]),
+			]);
 		}
 
 		updateStatus(ctx);
@@ -577,22 +691,23 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 
 	// ── Commands ──────────────────────────────────────────────────────────
 
-	pi.registerCommand("plan", {
-		description: "Toggle plan mode: idle → planning, planning → idle (use /plan-abort to cancel execution)",
+	pi.registerCommand("revdiff-plan-mode", {
+		description:
+			"Toggle plan mode: idle → planning, planning → idle (use /revdiff-plan-abort to cancel execution)",
 		handler: async (_args, ctx) => {
 			togglePlanMode(ctx);
 		},
 	});
 
 	// Fix #8: dedicated abort command so execution can't be cancelled by accident
-	pi.registerCommand("plan-abort", {
+	pi.registerCommand("revdiff-plan-abort", {
 		description: "Cancel plan execution and return to idle",
 		handler: async (_args, ctx) => {
 			if (phase !== "executing") {
 				ctx.ui.notify(
 					phase === "idle"
-						? "Not in plan mode. Use /plan to start."
-						: "Use /plan to toggle planning mode.",
+						? "Not in plan mode. Use /revdiff-plan-mode to start."
+						: "Use /revdiff-plan-mode to toggle planning mode.",
 					"info",
 				);
 				return;
@@ -601,7 +716,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("plan-status", {
+	pi.registerCommand("revdiff-plan-status", {
 		description: "Show current plan mode phase and progress",
 		handler: async (_args, ctx) => {
 			const parts = [`Phase: ${phase}`];
@@ -620,7 +735,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 
 	// ── Flag ──────────────────────────────────────────────────────────────
 
-	pi.registerFlag("plan", {
+	pi.registerFlag("revdiff-plan", {
 		description: "Start in plan mode",
 		type: "boolean",
 		default: false,
@@ -649,7 +764,7 @@ export function restoreState(
 	}
 
 	if (!restored) {
-		pi.setActiveTools(pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL));
+		pi.setActiveTools(stripPlanTools(pi.getActiveTools()));
 		return;
 	}
 
@@ -658,8 +773,14 @@ export function restoreState(
 	state.savedTools = restored.savedTools;
 
 	if (state.phase === "executing") {
-		if (state.lastSubmittedPath && existsSync(path.resolve(ctx.cwd, state.lastSubmittedPath))) {
-			const content = readFileSync(path.resolve(ctx.cwd, state.lastSubmittedPath), "utf8");
+		if (
+			state.lastSubmittedPath &&
+			existsSync(path.resolve(ctx.cwd, state.lastSubmittedPath))
+		) {
+			const content = readFileSync(
+				path.resolve(ctx.cwd, state.lastSubmittedPath),
+				"utf8",
+			);
 			state.checklistItems = parseChecklist(content);
 
 			let execIdx = -1;
@@ -680,8 +801,10 @@ export function restoreState(
 					if (text) markCompletedSteps(text, state.checklistItems);
 				}
 			}
-			const baseTools = state.savedTools.length > 0 ? state.savedTools : pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL && t !== MARK_DONE_TOOL);
-			pi.setActiveTools([...baseTools.filter((t) => t !== MARK_DONE_TOOL)]);
+			const baseTools = stripPlanTools(
+				state.savedTools.length > 0 ? state.savedTools : pi.getActiveTools(),
+			);
+			pi.setActiveTools([...baseTools]);
 			onUpdated();
 		} else {
 			state.phase = "idle";
@@ -690,7 +813,13 @@ export function restoreState(
 	}
 
 	if (state.phase === "planning") {
-		pi.setActiveTools([...new Set([...pi.getActiveTools().filter((t) => t !== PLAN_SUBMIT_TOOL), ...state.savedTools, PLAN_SUBMIT_TOOL])]);
+		pi.setActiveTools([
+			...new Set([
+				...stripPlanTools(pi.getActiveTools()),
+				...stripPlanTools(state.savedTools),
+				PLAN_SUBMIT_TOOL,
+			]),
+		]);
 		onUpdated();
 	}
 }
@@ -707,7 +836,11 @@ function isPersistedState(data: unknown): data is PersistedState {
 }
 
 function isClearedState(data: unknown): data is ClearedState {
-	return typeof data === "object" && data !== null && (data as ClearedState).cleared === true;
+	return (
+		typeof data === "object" &&
+		data !== null &&
+		(data as ClearedState).cleared === true
+	);
 }
 
 // ── Prompt strings ────────────────────────────────────────────────────────────
@@ -725,11 +858,22 @@ function buildApprovedPrompt(filePath: string): string {
 	].join("\n\n");
 }
 
-function buildDeniedPrompt(filePath: string, annotations: string, pathNote: string): string {
+function buildDeniedPrompt(
+	filePath: string,
+	annotations: string,
+	pathNote: string,
+): string {
 	return [
 		`${pathNote}The user reviewed "${filePath}" and left the following feedback:`,
 		annotations,
 		`Please revise the plan file at "${filePath}" to address this feedback, then call ${PLAN_SUBMIT_TOOL} again.`,
+	].join("\n\n");
+}
+
+function buildClosedPrompt(filePath: string, reason: string): string {
+	return [
+		`The revdiff review session for "${filePath}" was closed before a decision was made: ${reason}.`,
+		`The plan was neither approved nor rejected; call ${PLAN_SUBMIT_TOOL} again to reopen review.`,
 	].join("\n\n");
 }
 
@@ -738,7 +882,7 @@ You are in plan mode. You MUST NOT make any changes to the codebase — no edits
 
 ## Your goal
 
-Explore the codebase, understand the task, write a plan file, then call plan_submit to submit it for review.
+Explore the codebase, understand the task, write a plan file, then call revdiff_submit_plan to submit it for review.
 
 ## Plan file structure
 
@@ -755,6 +899,6 @@ Use a clear markdown file (e.g. PLAN.md) with:
 1. Explore with read, bash, grep, find, ls — understand what exists before proposing
 2. Write a skeleton plan early, refine as you learn more
 3. Ask the user if you hit ambiguities only they can answer
-4. Call plan_submit when the plan is ready
+4. Call revdiff_submit_plan when the plan is ready
 
 Keep it concise. Use write for the first draft, edit for all revisions.`;
