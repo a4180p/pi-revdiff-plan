@@ -13,12 +13,12 @@ This extension adds a lightweight state machine to Pi:
 The review loop is simple:
 
 1. Start plan mode with `/revdiff-plan-mode`
-2. Let the agent explore and write a markdown plan
+2. Let the agent explore and write a Markdown plan
 3. The agent calls `revdiff_submit_plan("PLAN.md")`
 4. `revdiff` opens for review
-5. If you quit with no annotations, the plan is approved
-6. If you annotate lines, the feedback goes back to the agent for revision
-7. Once approved, execution starts and checklist progress is tracked via `[DONE:n]`
+5. Quit with no annotations to approve, or annotate lines to request revisions
+6. After approval, the agent executes the checklist; each completed step updates its checkbox in the submitted plan
+7. When every checklist item is complete, the extension reports completion and returns to `idle`
 
 ## Prerequisites
 
@@ -77,7 +77,7 @@ pi --revdiff-plan
 # annotate and quit, or quit clean to approve
 ```
 
-After approval, the extension restores the previously active tool set and tracks progress using checklist items parsed from the approved markdown file. Completing a step updates its checkbox in the plan file. When every checklist item is complete, the extension returns to idle automatically.
+After approval, the extension restores the previously active tool set and adds `revdiff_mark_done`. The submitted plan is the progress record: completing a step updates its checkbox. When every checklist item is complete, the extension reports completion and returns to `idle` automatically.
 
 ## Commands
 
@@ -87,7 +87,8 @@ Toggles plan mode when safe:
 
 - `idle` → `planning`
 - `planning` → `idle`
-- during `executing`, it does not abort silently; it warns you to use `/revdiff-plan-abort`
+- during `executing` with an incomplete or empty checklist, it warns you to use `/revdiff-plan-abort`
+- during `executing` with every checklist item complete, it returns to `idle`
 
 ### `/revdiff-plan-abort`
 
@@ -132,14 +133,19 @@ Checklist items should be standard markdown task items, for example:
 - [ ] Update README
 ```
 
-During execution, the extension tracks completion when the agent emits markers like:
+During execution, the extension tracks completion by either of these mechanisms:
+
+- The agent calls `revdiff_mark_done` with a zero-based checklist index.
+- The agent emits a `[DONE:n]` marker in its response, where `n` is a zero-based checklist index.
+
+For example:
 
 ```text
 [DONE:0]
 [DONE:1]
 ```
 
-These markers should appear on their own lines.
+Markers are recognized anywhere outside fenced code blocks. Each completed item is written back to the submitted plan as `[x]`.
 
 ## Validation commands
 
@@ -205,7 +211,7 @@ That is expected. During planning, `write` and `edit` are restricted to markdown
 
 ### Progress did not update
 
-Checklist progress only updates in executing mode and depends on `[DONE:n]` markers matching the zero-based checklist index. Completing an item updates its matching checkbox in the submitted plan file. A plan without checklist items cannot complete automatically; use `/revdiff-plan-abort` to leave execution.
+Checklist progress only updates in executing mode. The agent should call `revdiff_mark_done` with a zero-based checklist index; `[DONE:n]` markers are also recognized as a fallback. Each completed item updates its matching checkbox in the submitted plan file. A plan without checklist items cannot complete automatically; use `/revdiff-plan-abort` to leave execution.
 
 ### Restored session looks wrong
 
@@ -213,25 +219,16 @@ The extension restores plan state from Pi session history. If the approved plan 
 
 ## CI and releases
 
-Recommended repository improvements:
-
-- CI to run type checking and tests on pushes and pull requests
-- automated release/versioning flow for publishing
-
-If those files exist in your fork, check `.github/workflows/`.
+GitHub Actions runs type checking and tests on pushes and pull requests. Releases are published from GitHub.
 
 ## Project structure
 
 ```text
-index.ts                # extension entrypoint
-src/constants.ts        # shared constants
-src/parsing.ts          # checklist parsing and path validation
-src/prompts.ts          # agent prompt helpers
-src/review.ts           # revdiff launch/review flow
-src/state.ts            # persistence and restore helpers
-src/commands.ts         # slash commands and flag registration
-.pi/extensions/rtk.ts   # optional RTK bash rewrite helper
-test/*.test.ts          # automated tests
+index.ts                # extension entrypoint and all extension logic
+test/parsing.test.ts    # parsing, progress, path, and review-outcome tests
+test/state.test.ts      # session-state restoration tests
+.github/workflows/      # CI and release workflows
+readme.md               # this file
 ```
 
 ## License
