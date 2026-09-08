@@ -12,9 +12,9 @@ This extension adds a lightweight state machine to Pi:
 
 The review loop is simple:
 
-1. Start plan mode with `/plan`
+1. Start plan mode with `/revdiff-plan-mode`
 2. Let the agent explore and write a markdown plan
-3. The agent calls `plan_submit("PLAN.md")`
+3. The agent calls `revdiff_submit_plan("PLAN.md")`
 4. `revdiff` opens for review
 5. If you quit with no annotations, the plan is approved
 6. If you annotate lines, the feedback goes back to the agent for revision
@@ -26,9 +26,11 @@ The review loop is simple:
 - [Pi coding agent](https://github.com/earendil-works/pi-coding-agent)
 - [revdiff](https://github.com/umputun/revdiff) available in `PATH`
   - macOS/Homebrew example:
+
     ```bash
     brew install umputun/apps/revdiff
     ```
+
 - A terminal environment where Pi can launch TUI tools
 
 ## Install
@@ -62,15 +64,15 @@ pi
 ### Start directly in plan mode
 
 ```bash
-pi --plan
+pi --revdiff-plan
 ```
 
 ### Typical session
 
 ```text
-/plan
+/revdiff-plan-mode
 # agent explores codebase and writes PLAN.md
-# agent calls plan_submit("PLAN.md")
+# agent calls revdiff_submit_plan("PLAN.md")
 # revdiff opens for review
 # annotate and quit, or quit clean to approve
 ```
@@ -79,19 +81,19 @@ After approval, the extension restores the previously active tool set and tracks
 
 ## Commands
 
-### `/plan`
+### `/revdiff-plan-mode`
 
 Toggles plan mode when safe:
 
 - `idle` → `planning`
 - `planning` → `idle`
-- during `executing`, it does not abort silently; it warns you to use `/plan-abort`
+- during `executing`, it does not abort silently; it warns you to use `/revdiff-plan-abort`
 
-### `/plan-abort`
+### `/revdiff-plan-abort`
 
 Cancels the current execution phase and returns to idle mode.
 
-### `/plan-status`
+### `/revdiff-plan-status`
 
 Shows:
 
@@ -102,14 +104,14 @@ Shows:
 
 ## Flags
 
-### `--plan`
+### `--revdiff-plan`
 
 Starts Pi with plan mode enabled.
 
 Example:
 
 ```bash
-pi --plan
+pi --revdiff-plan
 ```
 
 ## How plan files should look
@@ -186,6 +188,16 @@ Examples of rejected paths:
 - `../PLAN.md`
 - `/absolute/path/outside/repo.md`
 - `plan.txt`
+
+An absolute path is judged by containment, so one that points inside the working
+directory (for example `/repo/PLAN.md` while working in `/repo`) is accepted.
+
+### The review closed without a decision
+
+If `revdiff` cannot launch, or exits with anything other than its clean-quit (`0`)
+or annotations (`10`) codes, the plan is neither approved nor rejected. The agent
+is told to call `revdiff_submit_plan` again rather than treating the failure as
+plan feedback.
 
 ### The agent cannot edit source files in plan mode
 

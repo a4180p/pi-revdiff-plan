@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { restoreState, type RuntimeState, EXECUTE_ENTRY_TYPE, PLAN_SUBMIT_TOOL, STATE_ENTRY_TYPE } from "../index.js";
+import {
+	restoreState,
+	type RuntimeState,
+	EXECUTE_ENTRY_TYPE,
+	PLAN_SUBMIT_TOOL,
+	STATE_ENTRY_TYPE,
+} from "../index.js";
 
 function createState(): RuntimeState {
 	return {
@@ -37,12 +43,23 @@ test("restoreState restores executing checklist progress and active tools", () =
 			{
 				type: "custom",
 				customType: STATE_ENTRY_TYPE,
-				data: { phase: "executing", lastSubmittedPath: "PLAN.md", savedTools: ["read", "bash"] },
+				data: {
+					phase: "executing",
+					lastSubmittedPath: "PLAN.md",
+					savedTools: ["read", "bash"],
+				},
 			},
-			{ type: "custom", customType: EXECUTE_ENTRY_TYPE, data: { lastSubmittedPath: "PLAN.md" } },
+			{
+				type: "custom",
+				customType: EXECUTE_ENTRY_TYPE,
+				data: { lastSubmittedPath: "PLAN.md" },
+			},
 			{
 				type: "message",
-				message: { role: "assistant", content: [{ type: "text", text: "Done\n[DONE:1]" }] },
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "Done\n[DONE:1]" }],
+				},
 			},
 		];
 		const pi = createPi();
@@ -70,7 +87,7 @@ test("restoreState restores executing checklist progress and active tools", () =
 	}
 });
 
-test("restoreState honors cleared state and removes plan_submit", () => {
+test("restoreState honors cleared state and removes the plan-submit tool", () => {
 	const pi = createPi(["read", PLAN_SUBMIT_TOOL, "write"]);
 	const state = createState();
 	const entries = [
@@ -101,14 +118,18 @@ test("restoreState honors cleared state and removes plan_submit", () => {
 	assert.equal(updated, 0);
 });
 
-test("restoreState restores planning tools including plan_submit", () => {
+test("restoreState restores planning tools including the plan-submit tool", () => {
 	const pi = createPi(["read", "bash"]);
 	const state = createState();
 	const entries = [
 		{
 			type: "custom",
 			customType: STATE_ENTRY_TYPE,
-			data: { phase: "planning", lastSubmittedPath: null, savedTools: ["read", "bash"] },
+			data: {
+				phase: "planning",
+				lastSubmittedPath: null,
+				savedTools: ["read", "bash"],
+			},
 		},
 	];
 
@@ -125,4 +146,31 @@ test("restoreState restores planning tools including plan_submit", () => {
 	assert.equal(state.phase, "planning");
 	assert.deepEqual(pi.getActiveTools(), ["read", "bash", PLAN_SUBMIT_TOOL]);
 	assert.equal(updated, 1);
+});
+
+test("restoreState strips tool names persisted before the rename", () => {
+	// Sessions saved by an earlier version carry the old names; they must not
+	// survive into a restored tool list alongside the current ones.
+	const pi = createPi(["read", "plan_submit", "mark_done", "write"]);
+	const state = createState();
+	const entries = [
+		{
+			type: "custom",
+			customType: STATE_ENTRY_TYPE,
+			data: {
+				phase: "planning",
+				lastSubmittedPath: null,
+				savedTools: ["read", "plan_submit", "write"],
+			},
+		},
+	];
+
+	restoreState(
+		pi as never,
+		{ cwd: "/repo", sessionManager: { getBranch: () => entries } } as never,
+		state,
+		() => {},
+	);
+
+	assert.deepEqual(pi.getActiveTools(), ["read", "write", PLAN_SUBMIT_TOOL]);
 });
