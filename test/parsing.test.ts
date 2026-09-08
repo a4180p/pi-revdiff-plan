@@ -4,8 +4,10 @@ import {
 	classifyReviewOutcome,
 	getAssistantText,
 	isPlanPathAllowed,
+	isChecklistComplete,
 	markCompletedSteps,
 	parseChecklist,
+	renderChecklist,
 } from "../index.js";
 
 test("parseChecklist parses unchecked, checked, and DONE markers", () => {
@@ -53,6 +55,37 @@ test("markCompletedSteps matches inline markers and ignores code blocks", () => 
 		{ text: "second", completed: true },
 		{ text: "third", completed: false },
 	]);
+});
+
+test("renderChecklist persists completed items without altering plan text", () => {
+	const markdown = [
+		"# Plan",
+		"  - [ ] preserve indentation",
+		"- [DONE:1] normalise prior marker",
+		"- [x] preserve completed",
+		"plain text",
+	].join("\n");
+
+	assert.equal(
+		renderChecklist(markdown, [
+			{ text: "preserve indentation", completed: true },
+			{ text: "normalise prior marker", completed: false },
+			{ text: "preserve completed", completed: true },
+		]),
+		[
+			"# Plan",
+			"  - [x] preserve indentation",
+			"- [ ] normalise prior marker",
+			"- [x] preserve completed",
+			"plain text",
+		].join("\n"),
+	);
+});
+
+test("isChecklistComplete requires at least one completed item", () => {
+	assert.equal(isChecklistComplete([]), false);
+	assert.equal(isChecklistComplete([{ text: "one", completed: false }]), false);
+	assert.equal(isChecklistComplete([{ text: "one", completed: true }]), true);
 });
 
 test("markCompletedSteps ignores markers inside fenced code blocks", () => {
