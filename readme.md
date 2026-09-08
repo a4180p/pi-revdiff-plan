@@ -36,7 +36,7 @@ The review loop is simple:
 ## Install
 
 ```bash
-pi install pi-revdiff-plan
+pi install npm:pi-revdiff-plan
 ```
 
 Then verify:
