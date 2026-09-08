@@ -1,7 +1,8 @@
 {
   "name": "pi-revdiff-plan",
   "repository": "github:a4180p/pi-revdiff-plan",
-  "version": "0.2.0",
+  "version": "0.2.1",
+  "license": "MIT",
   "type": "module",
   "description": "Pi plan mode with revdiff TUI review",
   "keywords": [
