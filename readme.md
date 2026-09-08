@@ -77,7 +77,7 @@ pi --revdiff-plan
 # annotate and quit, or quit clean to approve
 ```
 
-After approval, the extension restores the previously active tool set and tracks progress using checklist items parsed from the approved markdown file.
+After approval, the extension restores the previously active tool set and tracks progress using checklist items parsed from the approved markdown file. Completing a step updates its checkbox in the plan file. When every checklist item is complete, the extension returns to idle automatically.
 
 ## Commands
 
@@ -205,7 +205,7 @@ That is expected. During planning, `write` and `edit` are restricted to markdown
 
 ### Progress did not update
 
-Checklist progress only updates in executing mode and depends on `[DONE:n]` markers matching the zero-based checklist index.
+Checklist progress only updates in executing mode and depends on `[DONE:n]` markers matching the zero-based checklist index. Completing an item updates its matching checkbox in the submitted plan file. A plan without checklist items cannot complete automatically; use `/revdiff-plan-abort` to leave execution.
 
 ### Restored session looks wrong
 

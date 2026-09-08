@@ -20,6 +20,7 @@ import {
 	existsSync,
 	mkdtempSync,
 	readFileSync,
+	writeFileSync,
 	rmSync,
 	statSync,
 } from "node:fs";
@@ -133,6 +134,24 @@ export function parseChecklist(markdown: string): ChecklistItem[] {
 	});
 }
 
+export function renderChecklist(
+	markdown: string,
+	items: ChecklistItem[],
+): string {
+	let index = 0;
+	return markdown.replace(
+		/^(\s*-\s+)\[([ xX]|DONE:\d+)\](\s+.+)$/gm,
+		(line, prefix, _marker, suffix) => {
+			const item = items[index++];
+			return item ? `${prefix}[${item.completed ? "x" : " "}]${suffix}` : line;
+		},
+	);
+}
+
+export function isChecklistComplete(items: ChecklistItem[]): boolean {
+	return items.length > 0 && items.every((item) => item.completed);
+}
+
 // Fix #3: strip code blocks first, then match [DONE:N] anywhere in the text
 function stripCodeBlocks(text: string): string {
 	return text.replace(/```[\s\S]*?```/g, "");
@@ -189,6 +208,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	let savedTools: string[] = [];
 	let checklistItems: ChecklistItem[] = [];
 	let justApprovedPlan = false;
+	let completionReported = false;
 	// UX #10: track revision count for status bar display
 	let submitCount = 0;
 	// UX #13: track last path passed to revdiff_submit_plan within a planning session
@@ -250,6 +270,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	function enterPlanning(ctx: ExtensionContext): void {
 		phase = "planning";
 		checklistItems = [];
+		completionReported = false;
 		submitCount = 0;
 		lastReviewedPath = null;
 		savedTools = pi.getActiveTools();
@@ -266,6 +287,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	function exitToIdle(ctx: ExtensionContext): void {
 		phase = "idle";
 		checklistItems = [];
+		completionReported = false;
 		lastSubmittedPath = null;
 		submitCount = 0;
 		lastReviewedPath = null;
@@ -285,6 +307,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			enterPlanning(ctx);
 		} else if (phase === "planning") {
 			exitToIdle(ctx);
+		} else if (isChecklistComplete(checklistItems)) {
+			exitToIdle(ctx);
 		} else {
 			// executing — require an explicit /revdiff-plan-abort to prevent accidental data loss
 			ctx.ui.notify(
@@ -292,6 +316,32 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 				"warning",
 			);
 		}
+	}
+
+	function persistChecklist(ctx: ExtensionContext): void {
+		if (!lastSubmittedPath) return;
+		const fullPath = path.resolve(ctx.cwd, lastSubmittedPath);
+		writeFileSync(
+			fullPath,
+			renderChecklist(readFileSync(fullPath, "utf8"), checklistItems),
+		);
+	}
+
+	function completeExecution(ctx: ExtensionContext): void {
+		if (completionReported || !isChecklistComplete(checklistItems)) return;
+		completionReported = true;
+		const completedList = checklistItems
+			.map((item) => `- [x] ~~${item.text}~~`)
+			.join("\n");
+		pi.sendMessage(
+			{
+				customType: "revdiff-plan-complete",
+				content: `**Plan Complete!** ✓\n\n${completedList}`,
+				display: true,
+			},
+			{ triggerTurn: false },
+		);
+		exitToIdle(ctx);
 	}
 
 	// Refactor #6: single helper shared by both approval paths (hasUI and !hasUI)
@@ -303,6 +353,7 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 	) {
 		lastSubmittedPath = inputPath;
 		checklistItems = parseChecklist(planContent);
+		completionReported = false;
 		phase = "executing";
 		pi.setActiveTools([
 			...stripPlanTools(savedTools.length > 0 ? savedTools : pi.getActiveTools()),
@@ -511,13 +562,14 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 				return toolText(`Step ${index} already marked done.`);
 			}
 			checklistItems[index]!.completed = true;
+			const done = checklistItems.filter((t) => t.completed).length;
+			const total = checklistItems.length;
+			persistChecklist(ctx);
 			updateStatus(ctx);
 			updateWidget(ctx);
 			persistState();
-			const done = checklistItems.filter((t) => t.completed).length;
-			return toolText(
-				`Step ${index} done. Progress: ${done}/${checklistItems.length}`,
-			);
+			completeExecution(ctx);
+			return toolText(`Step ${index} done. Progress: ${done}/${total}`);
 		},
 	});
 
@@ -563,9 +615,11 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 		if (!text) return;
 		// markCompletedSteps skips already-completed items, so no double-counting.
 		if (markCompletedSteps(text, checklistItems) > 0) {
+			persistChecklist(ctx);
 			updateStatus(ctx);
 			updateWidget(ctx);
 			persistState();
+			completeExecution(ctx);
 		}
 	});
 
@@ -577,22 +631,8 @@ export default function revdiffPlanExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		if (phase !== "executing" || checklistItems.length === 0) return;
-		if (!checklistItems.every((t) => t.completed)) return;
-
-		const completedList = checklistItems
-			.map((t) => `- [x] ~~${t.text}~~`)
-			.join("\n");
-		pi.sendMessage(
-			{
-				customType: "revdiff-plan-complete",
-				content: `**Plan Complete!** ✓\n\n${completedList}`,
-				display: true,
-			},
-			{ triggerTurn: false },
-		);
-		// Refactor #7: delegate to exitToIdle instead of duplicating reset logic
-		exitToIdle(ctx);
+		if (phase !== "executing") return;
+		completeExecution(ctx);
 	});
 
 	// Restore persisted state on session start/resume
